@@ -1,0 +1,443 @@
+https://bigquery.cloud.google.com/table/fh-bigquery:reddit_comments.2015_05
+
+##########################################################################################
+
+SELECT
+    author, #[better to name columns than *, query costs less]
+    FROM
+       [fh-bigquery:reddit_comments.2007],
+       [fh-bigquery:reddit_comments.2008],
+       [fh-bigquery:reddit_comments.2009],
+       [fh-bigquery:reddit_comments.2010],
+       [fh-bigquery:reddit_comments.2011],
+       [fh-bigquery:reddit_comments.2012],
+       [fh-bigquery:reddit_comments.2013],
+       [fh-bigquery:reddit_comments.2014],
+       [fh-bigquery:reddit_comments.2015_01],
+       [fh-bigquery:reddit_comments.2015_02],
+       [fh-bigquery:reddit_comments.2015_03],
+       [fh-bigquery:reddit_comments.2015_04],
+       [fh-bigquery:reddit_comments.2015_05]
+LIMIT 10
+
+##########################################################################################
+
+I checked for the most repeated comments by the same author - it's pretty clear that most of those are bots:
+
+SELECT LEFT(STRING(SEC_TO_TIMESTAMP(created_utc)), 7) month, SUM(gilded) golds
+    FROM
+       [fh-bigquery:reddit_comments.2007],
+       [fh-bigquery:reddit_comments.2008],
+       [fh-bigquery:reddit_comments.2009],
+       [fh-bigquery:reddit_comments.2010],
+       [fh-bigquery:reddit_comments.2011],
+       [fh-bigquery:reddit_comments.2012],
+       [fh-bigquery:reddit_comments.2013],
+       [fh-bigquery:reddit_comments.2014],
+       [fh-bigquery:reddit_comments.2015_01],
+       [fh-bigquery:reddit_comments.2015_02],
+       [fh-bigquery:reddit_comments.2015_03],
+       [fh-bigquery:reddit_comments.2015_04],
+       [fh-bigquery:reddit_comments.2015_05]
+GROUP BY 1
+ORDER BY 1
+
+this query processes 24.7 GB over 1.7 billion rows - guess how fast it will go
+
+##########################################################################################
+
+*** OTHER QUERIES ***
+
+SELECT YEAR(SEC_TO_TIMESTAMP(min_created_utc)) year, COUNT(*) authors, 
+  INTEGER(AVG(comments)) comments_avg, SEC_TO_TIMESTAMP(INTEGER(AVG(max_created_utc))) avg_end, 
+  SEC_TO_TIMESTAMP(INTEGER(AVG(
+    IF(max_created_utc-min_created_utc>3600*24*30*3,max_created_utc, null)
+  ))) avg_end_monthers,
+  SUM(YEAR(SEC_TO_TIMESTAMP(max_created_utc))=2015) still2015,
+  INTEGER(AVG(score_sum)) score_sum, SUM(gilded) gilded, INTEGER(AVG(body_length_avg)) avg
+FROM [fh-bigquery:reddit_extracts.cohorts_201505] 
+GROUP BY 1 
+ORDER BY 1
+
+##########################################################################################
+
+Number of comments per day of week - June 2015:
+
+SELECT DAYOFWEEK(SEC_TO_TIMESTAMP(created_utc)) day, COUNT(*) comments
+FROM [fh-bigquery:reddit_comments.2015_06] 
+GROUP BY 1
+ORDER BY 1
+
+day	comments
+Sunday	6128580
+Monday	9885148
+Tuesday	9716020
+Wednesday	7805037
+Thursday	7797045
+Friday	7472782
+Saturday	6114496
+
+##########################################################################################
+Reddit word associations: June 2015 presidential edition.
+
+I think this is the most beautiful piece of code I've ever written.
+Use this SQL to ask BigQuery what Reddit - the hivemind - 'the' reddit, thinks about something.
+Replace 'batman' with any concept:
+
+SELECT a.word, b.word, c, ratio
+FROM(
+  SELECT a.word, b.word, c, ratio, RANK() OVER(PARTITION BY a.word ORDER BY c DESC) rank
+  FROM (
+    SELECT a.word, b.word, COUNT(*) c, RATIO_TO_REPORT(c) OVER(PARTITION BY b.word) ratio
+    FROM (
+      SELECT word, id
+      FROM [fh-bigquery:reddit_comments.2015_06] a
+      CROSS JOIN (SELECT word FROM (SELECT 'batman' word)  # ***** REPLACE 'WORD' here!!!! ****
+                 ,(SELECT 'common' word),(SELECT 'when' word)) b
+      WHERE author NOT IN ('AutoModerator')
+      AND LOWER(body) CONTAINS word
+      AND subreddit NOT IN ('leagueoflegends')
+    ) a JOIN EACH (
+      SELECT word, id FROM (
+        SELECT SPLIT(LOWER(REGEXP_REPLACE(body, r'[\-/!\?\.\",*:()\[\]|\n]', ' ')), ' ') word, id
+        FROM [fh-bigquery:reddit_comments.2015_06]
+        WHERE REGEXP_MATCH(LOWER(body), 'the|common|when')
+        HAVING LENGTH(word)>2
+        AND NOT word IN ('the','and','that')
+      )
+      GROUP EACH BY 1,2
+    ) b
+    ON a.id=b.id
+    WHERE a.word!=b.word
+    GROUP EACH BY 1,2
+    HAVING c>60
+  )
+  WHERE ratio BETWEEN 0.15 AND 0.95
+  AND a.word NOT IN ('common','when') AND b.word NOT IN ('common','when')
+)
+WHERE rank<30
+ORDER BY a.word, c DESC
+
+(I tried a few words and this is AMAZING)
+Example for "quantum"
+quantum,mechanics,1971,0.6627437794216543
+quantum,physics,1967,0.7356020942408377
+quantum,universe,1041,0.44110169491525425
+quantum,particles,649,0.787621359223301
+quantum,particle,607,0.8125836680053548
+quantum,gravity,481,0.5619158878504673
+quantum,classical,422,0.49705535924617195
+quantum,relativity,395,0.8144329896907216
+quantum,computing,384,0.7032967032967034
+quantum,experiment,374,0.38437821171634123
+quantum,leap,368,0.5916398713826366
+...
+
+##########################################################################################
+
+Tuning the above for the word 'love':
+
+SELECT a.word, b.word, c, ratio
+FROM(
+  SELECT a.word, b.word, c, ratio, RANK() OVER(PARTITION BY a.word ORDER BY c DESC) rank
+  FROM (
+    SELECT a.word, b.word, COUNT(*) c, RATIO_TO_REPORT(c) OVER(PARTITION BY b.word) ratio
+    FROM (
+      SELECT word, id
+      FROM [fh-bigquery:reddit_comments.2015_06] a
+      CROSS JOIN (SELECT word FROM (SELECT 'love' word)  # ***** REPLACE 'WORD' here!!!! ****
+                 ,(SELECT 'common' word),(SELECT 'but' word)) b
+      WHERE author NOT IN ('AutoModerator')
+      AND LOWER(body) CONTAINS word
+      AND subreddit NOT IN ('leagueoflegends')
+    ) a JOIN EACH (
+      SELECT word, id FROM (
+        SELECT SPLIT(LOWER(REGEXP_REPLACE(body, r'[\-/!\?\.\",*:()\[\]|\n]', ' ')), ' ') word, id
+        FROM [fh-bigquery:reddit_comments.2015_06]
+        WHERE REGEXP_MATCH(LOWER(body), 'but|common|when')
+        HAVING LENGTH(word)>2
+        AND NOT word IN ('but','and','that')
+      )
+      GROUP EACH BY 1,2
+    ) b
+    ON a.id=b.id
+    WHERE a.word!=b.word
+    GROUP EACH BY 1,2
+    HAVING c>60
+  )
+  WHERE ratio BETWEEN 0.15 AND 0.95
+  AND a.word NOT IN ('common','but') AND b.word NOT IN ('common','but')
+)
+WHERE rank<30
+ORDER BY a.word, c DESC
+
+##########################################################################################
+
+Most popular words that other sub-reddits don't say:
+http://i.imgur.com/5Ysd1jE.png
+SELECT word, COUNT(*)
+FROM(FLATTEN((
+  SELECT SPLIT(LOWER(REGEXP_REPLACE(body, r'[\.\",*:()\[\]|\n]', ' ')), ' ') word
+  FROM [fh-bigquery:reddit_comments.2015_05] 
+  WHERE subreddit='trees'
+  AND author NOT IN (SELECT author FROM [fh-bigquery:reddit_comments.bots_201505])
+  ), word))
+WHERE word NOT IN (
+  SELECT word FROM (
+    SELECT word, COUNT(*)
+    FROM(FLATTEN((
+      SELECT SPLIT(LOWER(REGEXP_REPLACE(body, r'[\.\",*:()\[\]|\n]', ' ')), ' ') word
+      FROM [fh-bigquery:reddit_comments.2015_05] 
+      WHERE subreddit IN ('movies', 'politics', 'science')
+      ), word))
+    GROUP EACH BY 1 
+    ORDER BY 2 DESC
+    LIMIT 500))
+GROUP EACH BY 1 
+ORDER BY 2 DESC
+LIMIT 100
+Works by looking at the most popular words in one sub-reddit, and removes the most popular words in other sub-reddits.
+
+##########################################################################################
+
+Biggest growers July 2015 by number of authors:
+
+authors_2021507	authors_2021506	diff	multiplier	subreddit
+18331	3382	14949	5.42	/r/Windows10
+40436	8899	31537	4.54	/r/millionairemakers
+36064	11766	24298	3.07	/r/announcements
+4329	1509	2820	2.87	/r/lifeisstrange
+15945	5868	10077	2.72	/r/Terraria
+6439	2432	4007	2.65	/r/rickandmorty
+7442	3052	4390	2.44	/r/windows
+3416	1535	1881	2.23	/r/CatsStandingUp
+9928	4612	5316	2.15	/r/self
+3517	1709	1808	2.06	/r/speedrun
+2263	1112	1151	2.04	/r/ARK
+2059	1024	1035	2.01	/r/phish
+2184	1092	1092	2.0	/r/ufc
+4419	2321	2098	1.9	/r/NoMansSkyTheGame
+1912	1004	908	1.9	/r/TheoryOfReddit
+5900	3128	2772	1.89	/r/fivenightsatfreddys
+3064	1657	1407	1.85	/r/iOSthemes
+11349	6318	5031	1.8	/r/pathofexile
+
+SELECT MIN(a.authors) authors_2021507, MIN(b.authors) authors_2021506, 
+       MIN(a.authors-b.authors) diff,
+       MIN(ROUND(a.authors/b.authors,2)) multiplier, '/r/'+a.subreddit subreddit
+FROM (
+  SELECT EXACT_COUNT_DISTINCT(author) authors, subreddit
+  FROM [reddit_comments.2015_07] 
+  GROUP BY 2
+) a
+JOIN (
+  SELECT EXACT_COUNT_DISTINCT(author) authors, subreddit
+  FROM [reddit_comments.2015_06] 
+  GROUP BY 2
+  HAVING authors>1000
+) b
+ON a.subreddit=b.subreddit
+GROUP BY subreddit
+ORDER BY multiplier DESC
+LIMIT 18
+
+
+
+Biggest losers:
+
+authors_2021507	authors_2021506	diff	multiplier	subreddit
+19084	58314	-39230	0.33	/r/gameofthrones
+22332	46064	-23732	0.48	/r/Fallout
+122861	142354	-19493	0.86	/r/gaming
+34988	51888	-16900	0.67	/r/DestinyTheGame
+11000	25724	-14724	0.43	/r/Steam
+17903	32237	-14334	0.56	/r/asoiaf
+28985	39679	-10694	0.73	/r/Games
+12940	20666	-7726	0.63	/r/witcher
+58043	63562	-5519	0.91	/r/Music
+20318	25688	-5370	0.79	/r/xboxone
+30894	36080	-5186	0.86	/r/television
+20854	25739	-4885	0.81	/r/Fireteams
+48	4653	-4605	0.01	/r/SteamMonsterGame
+301	4705	-4404	0.06	/r/blog
+41929	46295	-4366	0.91	/r/nba
+6638	10198	-3560	0.65	/r/playark
+8262	11769	-3507	0.7	/r/GameDeals
+1671	4991	-3320	0.33	/r/orangeisthenewblack
+18152	21359	-3207	0.85	/r/dataisbeautiful
+11555	14755	-3200	0.78	/r/amiibo
+
+SELECT MIN(a.authors) authors_2021507, MIN(b.authors) authors_2021506, 
+       MIN(a.authors-b.authors) diff,
+       MIN(ROUND(a.authors/b.authors,2)) multiplier, '/r/'+a.subreddit subreddit
+FROM (
+  SELECT EXACT_COUNT_DISTINCT(author) authors, subreddit
+  FROM [reddit_comments.2015_07] 
+  GROUP BY 2
+) a
+JOIN (
+  SELECT EXACT_COUNT_DISTINCT(author) authors, subreddit
+  FROM [reddit_comments.2015_06] 
+  GROUP BY 2
+  HAVING authors>1000
+) b
+ON a.subreddit=b.subreddit
+GROUP BY subreddit
+ORDER BY diff 
+LIMIT 20
+
+##########################################################################################
+
+Reddit cliques: Sub-reddits that share the same commenters.
+
+http://i.imgur.com/6h6sWun.png
+SELECT sub_a, sub_b, percent, sub_ac, sub_bc
+FROM (
+SELECT sub_a, sub_b, percent, COUNT(*) OVER(PARTITION BY sub_a) sub_ac, sub_bc
+FROM(
+SELECT a.subreddit sub_a, b.subreddit sub_b, INTEGER(100*COUNT(*)/FIRST(authors)) percent, COUNT(*) OVER(PARTITION BY sub_b) sub_bc
+FROM (
+  SELECT author, subreddit, authors
+  FROM FLATTEN((
+    SELECT UNIQUE(author) author, a.subreddit subreddit, FIRST(authors) authors
+    FROM [fh-bigquery:reddit_comments.2015_05] a
+    JOIN [fh-bigquery:reddit_comments.subr_rank_201505] b
+    ON a.subreddit=b.subreddit
+    WHERE rank_authors>6 and rank_authors<120
+    GROUP EACH BY 2  
+  ),author)
+) a
+JOIN EACH (
+  SELECT author, subreddit
+  FROM FLATTEN((
+    SELECT UNIQUE(author) author, subreddit
+    FROM [fh-bigquery:reddit_comments.2015_05]
+    WHERE subreddit IN (SELECT subreddit FROM [fh-bigquery:reddit_comments.subr_rank_201505] 
+      WHERE rank_authors>6 and rank_authors<120
+    )
+    GROUP BY 2
+  ),author)
+) b
+ON a.author=b.author
+WHERE a.subreddit!=b.subreddit
+GROUP EACH BY 1,2
+HAVING percent>10
+)
+)
+WHERE sub_ac<20 AND sub_bc<20
+ORDER BY 2,4 DESC
+Visualized at http://bit.ly/reddit-cliques
+
+##########################################################################################
+
+Video visualization of the subreddit comment history:
+https://www.youtube.com/watch?v=l8MLIfU21pk
+
+The query I used to get the data for this visualization:
+SELECT month, subreddit, AVG(score),  COUNT(DISTINCT author), COUNT(DISTINCT id)
+FROM (
+SELECT score,subreddit, author, id, LEFT(STRING(SEC_TO_TIMESTAMP(created_utc)), 7) month
+FROM TABLE_QUERY([fh-bigquery:reddit_comments],
+    "table_id CONTAINS '20' AND LENGTH(table_id)<8")
+)
+WHERE subreddit IN (SELECT subreddit FROM [fh-bigquery:reddit_comments.subr_rank_201505] WHERE rank_authors<31)
+AND author NOT IN (SELECT author FROM [fh-bigquery:reddit_comments.bots_201505])
+GROUP EACH BY 1,2
+ORDER BY 1,3 DESC
+
+##########################################################################################
+
+Top posters in a subreddit. Meant for creating a table in reddit:
+SELECT "[" + A.Author + "](/u/" + A.Author + ")" AS Author, TotalPosts, TotalScore, /*AvgLength,*/ SEC_TO_TIMESTAMP(FirstComment),     SEC_TO_TIMESTAMP(LastComment), "[" + CAST(A.MinScore AS STRING) + "](/comments/" + REGEXP_REPLACE(MinUrl.Link_Id,"^t3_","") + "/_/" + MinUrl.Id + ")" AS MinScore, "[" + CAST(A.MaxScore AS STRING) + "](/comments/" + REGEXP_REPLACE(MaxUrl.Link_Id,"^t3_","") + "/_/" + MaxUrl.Id + ")" AS MaxScore, AvgScore FROM
+(
+  SELECT Author, COUNT(*) AS TotalPosts, AVG(LENGTH(Body)) AvgLength, SUM(Score) AS TotalScore, MIN(created_utc) AS FirstComment, MAX(created_utc) AS LastComment, MIN(score) AS MinScore, MAX(score) AS MaxScore, AVG(score) AS AvgScore
+  FROM TABLE_QUERY([fh-bigquery:reddit_comments], "table_id CONTAINS '20' AND LENGTH(table_id)<8") WHERE subreddit = 'bigquery'
+  GROUP BY 1
+) A
+INNER JOIN
+(
+  SELECT * FROM
+  (
+    SELECT author, link_id, id, ROW_NUMBER() OVER(PARTITION BY Author ORDER BY Score DESC) RowNum FROM TABLE_QUERY([fh-bigquery:reddit_comments], "table_id CONTAINS '20' AND LENGTH(table_id)<8") WHERE subreddit = 'bigquery'
+  )
+  WHERE RowNum = 1
+) AS MaxUrl ON A.author = MaxUrl.Author
+INNER JOIN
+(
+  SELECT * FROM
+  (
+    SELECT author, link_id, id, ROW_NUMBER() OVER(PARTITION BY Author ORDER BY Score) RowNum FROM TABLE_QUERY([fh-bigquery:reddit_comments], "table_id CONTAINS '20' AND LENGTH(table_id)<8") WHERE subreddit = 'bigquery'
+  )
+  WHERE RowNum = 1
+) AS MinUrl ON A.author = MinUrl.Author
+ORDER BY A.TotalPosts DESC
+
+Note it takes a long time to run for larger subreddits. Setting a LIMIT might help. For /r/bigquery:
+
+Author	TotalPosts	TotalScore	MinScore	MaxScore	AvgScore
+fhoffa	102	143	1	5	1.40
+[deleted]	8	9	0	2	1.13
+ImJasonH	6	21	2	5	3.50
+vadimska	6	10	1	2	1.67
+nickoftime444	5	12	2	3	2.40
+taxidata	4	14	1	8	3.50
+jrb1979	4	5	1	2	1.25
+westurner	4	4	1	1	1.00
+TweetPoster	4	5	1	2	1.25
+donaldstufft	3	7	1	5	2.33
+
+Uncomment /*AvgLength,*/ to get average post length in exchange for a big $$ data bill.
+I couldn't figure out how to get both the min and the max links using window functions so I did something similar to CROSS APPLY using INNER JOINs. 
+I think I can eliminate one of the INNER JOINs by doing ROW_NUMBER() OVER(). Can't think of a way to get rid of the second one.
+See a bigger table for /r/anarcho_capitalism.
+
+##########################################################################################
+
+Controversy is measured by: total votes / max(|upvotes-downvotes|, 1)
+The most controversial posts are those with the highest number of votes, with a "% upvotes" value as close to 50 as possible.
+
+
+##########################################################################################
+My Queries:
+
+select LEFT(STRING(SEC_TO_TIMESTAMP(created_utc)), 7) month,
+    FROM
+       [fh-bigquery:reddit_comments.2007],
+       [fh-bigquery:reddit_comments.2008],
+       [fh-bigquery:reddit_comments.2009],
+       [fh-bigquery:reddit_comments.2010],
+       [fh-bigquery:reddit_comments.2011],
+       [fh-bigquery:reddit_comments.2012],
+       [fh-bigquery:reddit_comments.2013],
+       [fh-bigquery:reddit_comments.2014],
+       [fh-bigquery:reddit_comments.2015_01],
+       [fh-bigquery:reddit_comments.2015_02],
+       [fh-bigquery:reddit_comments.2015_03],
+       [fh-bigquery:reddit_comments.2015_04],
+       [fh-bigquery:reddit_comments.2015_05],
+       [fh-bigquery:reddit_comments.2015_06],
+       [fh-bigquery:reddit_comments.2015_07],
+       [fh-bigquery:reddit_comments.2015_08],
+       [fh-bigquery:reddit_comments.2015_09],
+       [fh-bigquery:reddit_comments.2015_10],
+       [fh-bigquery:reddit_comments.2015_11],
+       [fh-bigquery:reddit_comments.2015_12],
+       [fh-bigquery:reddit_comments.2016_01]
+       
+where lower(subreddit) contains "whiterights"
+group by 1
+order by 1
+
+#################################################################
+Hashing for random sampling of data (boolean value in column)
+
+SELECT
+  *,
+  HASH(id) AS hash_value,
+  IF(ABS(HASH(id)) % 2 == 1, 'True', 'False') /* increase modulo for smaller sample */
+    AS included_in_sample
+
+FROM
+       [fh-bigquery:reddit_comments.2016_01]
+       
+where lower(subreddit) = 'shitredditsays'
